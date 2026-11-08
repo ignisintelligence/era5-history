@@ -1,0 +1,61 @@
+name: ERA5 history build
+
+# Builds the 2000-2020 daily "worst coincident hour" history for all of Australia from the public ERA5 data
+# (s3://nsf-ncar-era5, no login). Run "smoke" first: it only reads one week and prints a sanity report.
+# "full" runs one job per year (each reads ~50 GB, takes a few hours) and uploads one file per year.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: smoke = one week check (do this first); full = all 21 years
+        type: choice
+        options: [smoke, full]
+        default: smoke
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: ${{ inputs.mode == 'smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install numpy netCDF4 pytest
+      - name: Unit tests
+        working-directory: scripts/era5
+        run: python -m pytest -q test_era5_daily.py
+      - name: Smoke build (one week of January 2000)
+        working-directory: scripts/era5
+        run: python era5_daily.py --smoke --out out | tee smoke.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: era5-smoke
+          path: scripts/era5/out/era5_smoke.npz
+          retention-days: 7
+
+  full:
+    if: ${{ inputs.mode == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        year: [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install numpy netCDF4
+      - name: Build ${{ matrix.year }}
+        working-directory: scripts/era5
+        run: python era5_daily.py --year ${{ matrix.year }} --out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: era5-daily-${{ matrix.year }}
+          path: scripts/era5/out/era5_daily_${{ matrix.year }}.npz
+          retention-days: 30
