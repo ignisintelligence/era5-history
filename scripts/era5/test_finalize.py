@@ -29,7 +29,7 @@ def test_pipeline_end_to_end(tmp_path):
         np.savez_compressed(inp / f'era5_daily_{y}.npz', lat=lat, lon=lon, dates=dates, **packed)
     np.savez_compressed(inp / 'era5_landmask.npz', lat=lat, lon=lon, lsm=np.array([[1.0, 0.0], [0.6, 0.3]], np.float32))
     import sys
-    sys.argv = ['finalize', '--in', str(inp), '--out', str(tmp_path / 'out')]
+    sys.argv = ['finalize', '--in', str(inp), '--out', str(tmp_path / 'out'), '--strip', '1']
     fz.main()
     cells = json.load(open(tmp_path / 'out' / 'PrepareGridCell.records.json'))
     hist = json.load(open(tmp_path / 'out' / 'HistoryGrid.records.json'))

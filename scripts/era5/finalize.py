@@ -29,29 +29,42 @@ def unpack(z, key):
     return a
 
 
-def load_years(folder):
+def load_years(folder, work):
+    """Reads each yearly file once and appends it to on-disk arrays (days, lat, lon), so a strip of the country
+    can later be processed without holding the whole 21-year series in memory."""
     files = sorted(glob.glob(os.path.join(folder, '**', 'era5_daily_*.npz'), recursive=True))
     if not files:
         raise SystemExit('no era5_daily_*.npz files found')
     years = [int(os.path.basename(f)[11:15]) for f in files]
     if years != list(range(years[0], years[0] + len(years))):
         raise SystemExit(f'years are not consecutive: {years}')
+    os.makedirs(work, exist_ok=True)
+    meta = []
+    for f in files:                       # first pass: sizes only
+        z = np.load(f, allow_pickle=False)
+        meta.append((f, len(z['dates'])))
+    ndays = sum(n for _, n in meta)
     lat = lon = None
-    parts, dates = {}, []
-    for f in files:
+    mm, dates, pos = {}, [], 0
+    for f, n in meta:
         z = np.load(f, allow_pickle=False)           # never allow pickles: data only
         if lat is None:
             lat, lon = z['lat'], z['lon']
+            for k in SCALES:
+                mm[k] = np.lib.format.open_memmap(os.path.join(work, k + '.npy'), mode='w+', dtype=np.float32, shape=(ndays, len(lat), len(lon)))
         elif not (np.array_equal(lat, z['lat']) and np.array_equal(lon, z['lon'])):
             raise SystemExit(f'{f}: grid differs from the other years')
-        dates += [str(d) for d in z['dates']]
+        dates += [str(x) for x in z['dates']]
         for k in SCALES:
-            a = unpack(z, k)
+            arr = unpack(z, k)
             lo, hi = SANE[k]
-            if np.nanmin(a) < lo - 1e-3 or np.nanmax(a) > hi + 1e-3:
-                raise SystemExit(f'{f}: {k} outside real-world range ({np.nanmin(a)}..{np.nanmax(a)})')
-            parts.setdefault(k, []).append(a)
-    return lat, lon, dates, {k: np.concatenate(v, axis=0) for k, v in parts.items()}, years
+            if np.nanmin(arr) < lo - 1e-3 or np.nanmax(arr) > hi + 1e-3:
+                raise SystemExit(f'{f}: {k} outside real-world range ({np.nanmin(arr)}..{np.nanmax(arr)})')
+            mm[k][pos:pos + n] = arr
+        pos += n
+    for v in mm.values():
+        v.flush()
+    return lat, lon, dates, mm, years
 
 
 def drought_factor(tmax, rain):
@@ -103,47 +116,48 @@ def r1(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--in', dest='inp', required=True); ap.add_argument('--out', required=True)
+    ap.add_argument('--strip', type=int, default=8, help='latitude rows processed at once')
     a = ap.parse_args()
-    lat, lon, dates, d, years = load_years(a.inp)
+    work = os.path.join(a.out, '_work')
+    lat, lon, dates, mm, years = load_years(a.inp, work)
     lm = np.load(glob.glob(os.path.join(a.inp, '**', 'era5_landmask.npz'), recursive=True)[0], allow_pickle=False)
     if not (np.array_equal(lm['lat'], lat) and np.array_equal(lm['lon'], lon)):
         raise SystemExit('land mask grid differs from the daily files')
     lsm = lm['lsm']
-    print(f'{len(dates)} days ({years[0]}-{years[-1]}), grid {len(lat)} x {len(lon)}')
-
-    df = drought_factor(d['tmax'], d['rain'])
-    f = ffdi(d['w_temp'], d['w_rh'], d['w_wind'], df)
-    print('drought factor and FFDI done; FFDI max', float(np.nanmax(f)))
+    print(f'{len(dates)} days ({years[0]}-{years[-1]}), grid {len(lat)} x {len(lon)}', flush=True)
 
     base = os.path.join(a.out, 'files')
-    # ── Ignite history files (every point with some land) ──
-    hist_records, hist_idx = [], 0
-    for i in range(len(lat)):
-        for j in range(len(lon)):
-            if lsm[i, j] < HISTORY_LAND:
-                continue
-            key = f'{lat[i]:.2f}_{lon[j]:.2f}'
-            raw = {'startDate': dates[0], 'source': 'ERA5 worst-hour', 'tmax': r1(d['w_temp'][:, i, j]), 'rhMin': r1(d['w_rh'][:, i, j]),
-                   'rhMax': r1(d['rh_max'][:, i, j]), 'windMax': r1(d['w_wind'][:, i, j]), 'rain': r1(d['rain'][:, i, j])}
-            write_gz(os.path.join(base, 'history', 'era5', f'h_{key}.json.gz'), raw)
-            hist_records.append({'geoKey': f'{lat[i]:.2f},{lon[j]:.2f}', 'lat': float(lat[i]), 'lng': float(lon[j]), 'status': 'complete',
-                                 'file_key': f'files/history/era5/h_{key}.json.gz'})
-    print(f'{len(hist_records)} Ignite history files')
+    hist_records, detail, summary = [], {}, {}
+    top_ffdi = 0.0
+    for i0 in range(0, len(lat), a.strip):
+        i1 = min(len(lat), i0 + a.strip)
+        if not ((lsm[i0:i1] >= min(HISTORY_LAND, PREPARE_LAND)).any()):
+            continue
+        d = {k: np.asarray(mm[k][:, i0:i1, :]) for k in SCALES}
+        df = drought_factor(d['tmax'], d['rain'])
+        f = ffdi(d['w_temp'], d['w_rh'], d['w_wind'], df)
+        top_ffdi = max(top_ffdi, float(np.nanmax(f)))
+        for ii in range(i1 - i0):
+            gi = i0 + ii
+            for j in range(len(lon)):
+                land = lsm[gi, j]
+                if land >= HISTORY_LAND:
+                    key = f'{lat[gi]:.2f}_{lon[j]:.2f}'
+                    raw = {'startDate': dates[0], 'source': 'ERA5 worst-hour', 'tmax': r1(d['w_temp'][:, ii, j]), 'rhMin': r1(d['w_rh'][:, ii, j]),
+                           'rhMax': r1(d['rh_max'][:, ii, j]), 'windMax': r1(d['w_wind'][:, ii, j]), 'rain': r1(d['rain'][:, ii, j])}
+                    write_gz(os.path.join(base, 'history', 'era5', f'h_{key}.json.gz'), raw)
+                    hist_records.append({'geoKey': f'{lat[gi]:.2f},{lon[j]:.2f}', 'lat': float(lat[gi]), 'lng': float(lon[j]), 'status': 'complete',
+                                         'file_key': f'files/history/era5/h_{key}.json.gz'})
+                if land >= PREPARE_LAND:
+                    t = top20(f, dates, d, ii, j)
+                    if t:
+                        avg = round(sum(x['ffdi'] for x in t) / len(t), 1)
+                        detail[(gi, j)] = f'files/prepare/era5/p_{lat[gi]:.2f}_{lon[j]:.2f}.json.gz'
+                        summary[(gi, j)] = (avg, t[0]['ffdi'])
+                        write_gz(os.path.join(base, 'prepare', 'era5', f'p_{lat[gi]:.2f}_{lon[j]:.2f}.json.gz'), t)
+        print(f'  rows {i0}-{i1} of {len(lat)} done', flush=True)
+    print(f'{len(hist_records)} Ignite history files; highest FFDI {top_ffdi}')
 
-    # ── Prepare: top-20 detail per land point, cells on the 0.15 degree grid ──
-    detail, summary = {}, {}
-    for i in range(len(lat)):
-        for j in range(len(lon)):
-            if lsm[i, j] < PREPARE_LAND:
-                continue
-            t = top20(f, dates, d, i, j)
-            if not t:
-                continue
-            avg = round(sum(x['ffdi'] for x in t) / len(t), 1)
-            detail[(i, j)] = f'files/prepare/era5/p_{lat[i]:.2f}_{lon[j]:.2f}.json.gz'
-            summary[(i, j)] = (avg, t[0]['ffdi'])
-            write_gz(os.path.join(base, 'prepare', 'era5', f'p_{lat[i]:.2f}_{lon[j]:.2f}.json.gz'), t)
-    lat_s, lon_s = np.sort(lat), lon
     cells = []
     la = np.ceil(lat.min() / CELL) * CELL
     while la <= lat.max():
@@ -157,13 +171,14 @@ def main():
             lo += CELL
         la += CELL
     print(f'{len(cells)} Prepare cells from {len(summary)} land points')
-    os.makedirs(a.out, exist_ok=True)
     json.dump(cells, open(os.path.join(a.out, 'PrepareGridCell.records.json'), 'w'))
     json.dump(hist_records, open(os.path.join(a.out, 'HistoryGrid.records.json'), 'w'))
     ratings = {}
     for c in cells:
         ratings[c['rating']] = ratings.get(c['rating'], 0) + 1
     print('Prepare rating counts:', ratings)
+    import shutil
+    shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == '__main__':

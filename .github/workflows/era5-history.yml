@@ -7,13 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: smoke = one week check (do this first); landmask = land/sea mask (small, run once); full = all 21 years
+        description: smoke = one week check (do this first); landmask = land/sea mask (small, run once); full = all 21 years; finalize = turn the finished full run into the app's files
         type: choice
-        options: [smoke, landmask, full]
+        options: [smoke, landmask, full, finalize]
         default: smoke
+      full_run_id:
+        description: finalize only - the run number-id of the finished full run (the long number in its web address)
+        type: string
+        required: false
+      landmask_run_id:
+        description: finalize only - the run id of the landmask run
+        type: string
+        required: false
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   landmask:
@@ -76,3 +85,35 @@ jobs:
           name: era5-daily-${{ matrix.year }}
           path: scripts/era5/out/era5_daily_${{ matrix.year }}.npz
           retention-days: 30
+
+  finalize:
+    if: ${{ inputs.mode == 'finalize' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install numpy pytest
+      - name: Unit tests
+        working-directory: scripts/era5
+        run: python -m pytest -q
+      - name: Download the yearly files and the land mask
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p in
+          gh run download "${{ inputs.full_run_id }}" -D in -p 'era5-daily-*'
+          gh run download "${{ inputs.landmask_run_id }}" -D in -n era5-landmask
+          find in -name '*.npz' | sort
+      - name: Build the app's files
+        working-directory: scripts/era5
+        run: python finalize.py --in ../../in --out ../../final
+      - name: Pack
+        run: tar -czf era5-final.tar.gz final
+      - uses: actions/upload-artifact@v4
+        with:
+          name: era5-final
+          path: era5-final.tar.gz
+          retention-days: 30
+          compression-level: 0
