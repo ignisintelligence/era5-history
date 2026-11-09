@@ -36,6 +36,6 @@ def test_pipeline_end_to_end(tmp_path):
     assert len(hist) == 3 and cells and all(c['status'] == 'complete' for c in cells)
     f = tmp_path / 'out' / hist[0]['file_key']
     raw = json.load(gzip.open(f, 'rt'))
-    assert len(raw['tmax']) == 731 and raw['startDate'] == '2000-01-01' and set(raw) >= {'tmax', 'rhMin', 'rhMax', 'windMax', 'rain', 'df', 'ffdi'} and len(raw['df']) == 731 and len(raw['ffdi']) == 731
+    assert len(raw['tmax']) == 731 and raw['startDate'] == '2000-01-01' and set(raw) >= {'tmax', 'rhMin', 'rhMax', 'windMax', 'rain', 'df', 'ffdi', 'windDir', 'hour'} and len(raw['df']) == 731 and len(raw['ffdi']) == 731
     top = json.load(gzip.open(tmp_path / 'out' / cells[0]['file_key'], 'rt'))
     assert len(top) == 20 and top[0]['ffdi'] >= top[-1]['ffdi'] and cells[0]['maxFfdi'] == top[0]['ffdi']

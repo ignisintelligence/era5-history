@@ -145,7 +145,8 @@ def main():
                     key = f'{lat[gi]:.2f}_{lon[j]:.2f}'
                     raw = {'startDate': dates[0], 'source': 'ERA5 worst-hour', 'tmax': r1(d['w_temp'][:, ii, j]), 'rhMin': r1(d['w_rh'][:, ii, j]),
                            'rhMax': r1(d['rh_max'][:, ii, j]), 'windMax': r1(d['w_wind'][:, ii, j]), 'rain': r1(d['rain'][:, ii, j]),
-                           'df': r1(df[:, ii, j]), 'ffdi': r1(f[:, ii, j])}
+                           'df': r1(df[:, ii, j]), 'ffdi': r1(f[:, ii, j]),
+                           'windDir': r1(d['w_dir'][:, ii, j]), 'hour': [None if not np.isfinite(x) else int(x) for x in d['w_hour'][:, ii, j]]}
                     write_gz(os.path.join(base, 'history', 'era5', f'h_{key}.json.gz'), raw)
                     hist_records.append({'geoKey': f'{lat[gi]:.2f},{lon[j]:.2f}', 'lat': float(lat[gi]), 'lng': float(lon[j]), 'status': 'complete',
                                          'file_key': f'files/history/era5/h_{key}.json.gz'})
