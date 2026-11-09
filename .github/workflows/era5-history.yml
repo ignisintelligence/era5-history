@@ -7,15 +7,32 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: smoke = one week check (do this first); full = all 21 years
+        description: smoke = one week check (do this first); landmask = land/sea mask (small, run once); full = all 21 years
         type: choice
-        options: [smoke, full]
+        options: [smoke, landmask, full]
         default: smoke
 
 permissions:
   contents: read
 
 jobs:
+  landmask:
+    if: ${{ inputs.mode == 'landmask' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install numpy netCDF4
+      - working-directory: scripts/era5
+        run: python era5_landmask.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: era5-landmask
+          path: scripts/era5/out/era5_landmask.npz
+          retention-days: 90
+
   smoke:
     if: ${{ inputs.mode == 'smoke' }}
     runs-on: ubuntu-latest
@@ -27,7 +44,7 @@ jobs:
       - run: pip install numpy netCDF4 pytest
       - name: Unit tests
         working-directory: scripts/era5
-        run: python -m pytest -q test_era5_daily.py
+        run: python -m pytest -q
       - name: Smoke build (one week of January 2000)
         working-directory: scripts/era5
         run: python era5_daily.py --smoke --out out | tee smoke.log

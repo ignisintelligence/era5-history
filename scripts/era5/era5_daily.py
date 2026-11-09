@@ -204,6 +204,7 @@ def build(t0, ndays, tmp):
         for k, v in parts.items():
             res.setdefault(k, []).append(np.concatenate(v, axis=0))
     res = {k: np.concatenate(v, axis=2) for k, v in res.items()}
+    grid['_raw'] = (arrays, rain)   # kept for the smoke-test hour-by-hour printout
     return grid, res
 
 
@@ -224,6 +225,7 @@ def main():
     dates = np.array([(first + dt.timedelta(days=i)).isoformat() for i in range(ndays)])
     packed = {k: np.round(np.nan_to_num(v, nan=-32768 / SCALES[k]) * SCALES[k]).astype(np.int16) for k, v in res.items()}
     name = 'era5_smoke.npz' if a.smoke else f'era5_daily_{first.year}.npz'
+    grid_raw = grid.pop('_raw')
     np.savez_compressed(os.path.join(a.out, name), lat=grid['lat'], lon=grid['lon'], dates=dates, **packed)
     print(f'wrote {name}: {ndays} days, {len(grid["lat"])} x {len(grid["lon"])} points')
     if a.smoke:
@@ -233,6 +235,22 @@ def main():
             print(f'\n{label} (grid {lat[i]:.2f},{lon[j]:.2f}):')
             for d in range(ndays):
                 print('  ', dates[d], ' '.join(f'{k}={float(res[k][d, i, j]):.1f}' for k in res))
+        arrays, rain = grid_raw
+        print('\nHOUR-BY-HOUR CHECK (drought factor 5 for display; the worst hour does not depend on it)')
+        for label, (la, lo) in {'Longreach': (-23.44, 144.25), 'Sydney': (-33.87, 151.21), 'Perth': (-31.95, 115.86)}.items():
+            i = int(np.abs(lat - la).argmin()); j = int(np.abs(lon - lo).argmin())
+            o = int(utc_offset_for_lon(np.array([lon[j]]))[0]); start = BASE_OFFSET - o
+            for d in (3, 4):
+                sl = slice(start + d * 24, start + (d + 1) * 24)
+                T = arrays['128_167_2t'][sl, i, j] - 273.15
+                RH = rh_from_dewpoint(T, arrays['128_168_2d'][sl, i, j] - 273.15)
+                W, _ = wind_from_uv(arrays['128_165_10u'][sl, i, j], arrays['128_166_10v'][sl, i, j])
+                F = 2 * np.exp(0.987 * np.log(5) - 0.0345 * np.maximum(1, RH) + 0.0338 * T + 0.0234 * W - 0.45)
+                best = int(F.argmax())
+                print(f'\n{label} {dates[d]} (local standard time)   hour  temp   RH  wind   FFDI')
+                for h in range(24):
+                    print(f'                              {h:4d} {T[h]:5.1f} {RH[h]:4.0f} {W[h]:5.1f} {F[h]:6.1f}' + ('   <== worst hour' if h == best else ''))
+                print(f'   separate extremes would give: temp {T.max():.1f}, RH {RH.min():.0f}, wind {W.max():.1f} -> FFDI {2*np.exp(0.987*np.log(5)-0.0345*max(1,RH.min())+0.0338*T.max()+0.0234*W.max()-0.45):.1f}   (worst hour FFDI {F.max():.1f})')
         print('\nrange check:')
         for k, v in res.items():
             print(f'  {k:9s} min {np.nanmin(v):8.2f}  max {np.nanmax(v):8.2f}  mean {np.nanmean(v):8.2f}')
